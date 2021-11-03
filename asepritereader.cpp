@@ -242,6 +242,7 @@ void AsepriteReader::load(const std::string& path)
 							const unsigned short CEL_LINK=readUInt16(in);
 
 							cel->pixels=file.frames[CEL_LINK]->cels[LAYER_INDEX]->pixels;
+							cel->size=file.frames[CEL_LINK]->cels[LAYER_INDEX]->size;
 							}
 						break;
 
