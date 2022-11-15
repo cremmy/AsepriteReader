@@ -12,62 +12,81 @@
 #include <sstream>
 #include <zlib.h>
 
-const uint16_t ASEPRITE_MAGIC_NUMBER_FILE=0xA5E0;
-const uint16_t ASEPRITE_MAGIC_NUMBER_FRAME=0xF1FA;
 
-enum ChunkType
+using namespace Aseprite;
+
+// Additional constants, internal to Aseprite's file format
+namespace AsepriteFileConstants
 	{
-	CHUNK_LAYER=     0x2004,
-	CHUNK_CEL=       0x2005,
-	CHUNK_CELEXTRA=  0x2006,
-	CHUNK_FRAME_TAGS=0x2018,
-	CHUNK_PALETTE=   0x2019,
-	CHUNK_USERDATA=  0x2020,
-	CHUNK_SLICE=     0x2022,
-	};
+	const uint16_t ASEPRITE_MAGIC_NUMBER_FILE=0xA5E0;
+	const uint16_t ASEPRITE_MAGIC_NUMBER_FRAME=0xF1FA;
 
-enum LayerType
-	{
-	LAYER_NORMAL=0,
-	LAYER_GROUP= 1,
-	};
-
-enum Flag
-	{
-	FLAG_LAYER_VISIBLE= 0x1<<0,
-
-	FLAG_USERDATA_TEXT= 0x1<<0,
-	FLAG_USERDATA_COLOR=0x1<<1,
-
-	FLAG_SLICE_9SLICES= 0x1<<0,
-	FLAG_SLICE_PIVOT=   0x1<<1,
-	};
-
-enum CelType
-	{
-	CEL_RAW=       0,
-	CEL_LINKED=    1,
-	CEL_COMPRESSED=2,
-	};
-
-void AsepriteReader::load(const std::string& path)
-	{
-	std::fstream in;
-
-	in.open(path.c_str(), std::ios::in|std::ios::binary);
-
-	if(!in.is_open())
+	enum ChunkType
 		{
-		throw ResourceLoadException("File not found");
+		CHUNK_LAYER=0x2004,
+		CHUNK_CEL=0x2005,
+		CHUNK_CELEXTRA=0x2006,
+		CHUNK_FRAME_TAGS=0x2018,
+		CHUNK_PALETTE=0x2019,
+		CHUNK_USERDATA=0x2020,
+		CHUNK_SLICE=0x2022,
+		};
+
+	enum LayerType
+		{
+		LAYER_NORMAL=0,
+		LAYER_GROUP=1,
+		};
+
+	enum Flag
+		{
+		FLAG_LAYER_VISIBLE=0x1<<0,
+
+		FLAG_USERDATA_TEXT=0x1<<0,
+		FLAG_USERDATA_COLOR=0x1<<1,
+
+		FLAG_SLICE_9SLICES=0x1<<0,
+		FLAG_SLICE_PIVOT=0x1<<1,
+		};
+
+	enum CelType
+		{
+		CEL_RAW=0,
+		CEL_LINKED=1,
+		CEL_COMPRESSED=2,
+		};
+	}
+
+
+AsepriteFilePtr AsepriteReader::load(const std::string& path)
+	{
+	if(auto it=resources.find(path); it!=resources.end())
+		{
+		//if(!it->second.expired())
+			return it->second;// .lock();
 		}
 
-	// Funkcje pomocnicze
+	auto ptr=loadInternal(path);
+
+	resources[path]=ptr;
+
+	return ptr;
+	}
+
+AsepriteFilePtr AsepriteReader::loadInternal(const std::string& path)
+	{
+	using namespace Aseprite;
+	using namespace AsepriteFileConstants;
+
+	/*****************************************************************************/
+	/* Helpers *******************************************************************/
+	/*****************************************************************************/
 	auto readUInt8=[&path](std::fstream& in)->uint8_t
 		{
 		uint8_t tmp;
 		in.read(reinterpret_cast<char*>(&tmp), sizeof(tmp));
 		if(!in.good())
-			throw ResourceLoadException("Unexpected EOF");
+			throw ResourceLoadException("Unexpected end of file");
 		return tmp;
 		};
 	auto readInt16=[&path](std::fstream& in)->int16_t
@@ -75,7 +94,7 @@ void AsepriteReader::load(const std::string& path)
 		int16_t tmp;
 		in.read(reinterpret_cast<char*>(&tmp), sizeof(tmp));
 		if(!in.good())
-			throw ResourceLoadException("Unexpected EOF");
+			throw ResourceLoadException("Unexpected end of file");
 		return tmp;
 		};
 	auto readUInt16=[&path](std::fstream& in)->uint16_t
@@ -83,7 +102,7 @@ void AsepriteReader::load(const std::string& path)
 		uint16_t tmp;
 		in.read(reinterpret_cast<char*>(&tmp), sizeof(tmp));
 		if(!in.good())
-			throw ResourceLoadException("Unexpected EOF");
+			throw ResourceLoadException("Unexpected end of file");
 		return tmp;
 		};
 	auto readUInt32=[&path](std::fstream& in)->uint32_t
@@ -91,7 +110,7 @@ void AsepriteReader::load(const std::string& path)
 		uint32_t tmp;
 		in.read(reinterpret_cast<char*>(&tmp), sizeof(tmp));
 		if(!in.good())
-			throw ResourceLoadException("Unexpected EOF");
+			throw ResourceLoadException("Unexpected end of file");
 		return tmp;
 		};
 	auto readString=[&path](std::fstream& in, unsigned short length)->std::string
@@ -103,7 +122,7 @@ void AsepriteReader::load(const std::string& path)
 		};
 	auto readBytes=[&path](std::fstream& in, unsigned short length)->uint8_t*
 		{
-		uint8_t *data=new uint8_t[length+1];
+		uint8_t* data=new uint8_t[length+1];
 		in.read(reinterpret_cast<char*>(data), length);
 		data[length]=0;
 		return data;
@@ -112,15 +131,31 @@ void AsepriteReader::load(const std::string& path)
 		{
 		in.seekg(count, std::ios::cur);
 		if(!in.good())
-			throw ResourceLoadException("Unexpected EOF");
+			throw ResourceLoadException("Unexpected end of file");
 		};
 
-	// Wczytywanie
+	/*****************************************************************************/
+	/*****************************************************************************/
+	/*****************************************************************************/
+	auto ptr=std::make_shared<File>();
+	auto& file=*ptr;
+
+	file.path=path;
+
+	std::fstream in;
+	in.open(path.c_str(), std::ios::in|std::ios::binary);
+
+	if(!in.is_open())
+		{
+		throw ResourceLoadException("Could not open the file");
+		}
+
+	// Load file
 	skipBytes(in, 4); // File size
 
 	if(readUInt16(in)!=ASEPRITE_MAGIC_NUMBER_FILE)
 		{
-		throw ResourceLoadException("Magic number mismatch");
+		throw ResourceLoadException("Invalid Aseprite file (magic number -> file)");
 		}
 
 	const unsigned short FRAME_COUNT=readUInt16(in);
@@ -130,7 +165,7 @@ void AsepriteReader::load(const std::string& path)
 
 	if(COLOR_DEPTH!=32)
 		{
-		throw ResourceLoadException("Unsupported color depth");
+		throw ResourceLoadException("Not supported color depth: "+std::to_string(COLOR_DEPTH)+"bpp");
 		}
 
 	skipBytes(in, 4); // File flags
@@ -147,7 +182,7 @@ void AsepriteReader::load(const std::string& path)
 
 		if(readUInt16(in)!=ASEPRITE_MAGIC_NUMBER_FRAME)
 			{
-			throw ResourceLoadException("Magic number mismatch");
+			throw ResourceLoadException("Invalid Aseprite file (magic number -> frame)");
 			}
 
 		file.frames.push_back(std::make_unique<Frame>());
@@ -157,10 +192,14 @@ void AsepriteReader::load(const std::string& path)
 		frame->duration=readUInt16(in);
 		skipBytes(in, 6);
 
+		//LOG_DEBUG(" - Frame {:3d}/{:3d} [at 0x{:08X}]", idxFrame, FRAME_COUNT, in.tellg());
+
 		for(unsigned idxChunk=0u; idxChunk<CHUNK_COUNT; ++idxChunk)
 			{
 			const unsigned int CHUNK_SIZE=readUInt32(in);
 			const unsigned short CHUNK_TYPE=readUInt16(in);
+
+			//LOG_DEBUG("   - Chunk {:3d}/{:3d} [0x{:08X} size {}][type {}]", idxChunk, CHUNK_COUNT, in.tellg(), CHUNK_SIZE, CHUNK_TYPE);
 
 			switch(CHUNK_TYPE)
 				{
@@ -184,7 +223,7 @@ void AsepriteReader::load(const std::string& path)
 
 					if(LAYER_CHILD_LEVEL==0)
 						{
-						// Top layer
+						// Highest level layer
 						}
 					else
 						{
@@ -228,7 +267,7 @@ void AsepriteReader::load(const std::string& path)
 							const unsigned int CEL_DATA_LENGTH=CHUNK_SIZE-26;
 							if(cel->layer->isVisible)
 								{
-								cel->pixels=std::shared_ptr<uint8_t>(readBytes(in, CEL_DATA_LENGTH));
+								cel->pixels=std::shared_ptr<uint8_t[]>(readBytes(in, CEL_DATA_LENGTH));
 								}
 							else
 								{
@@ -257,12 +296,12 @@ void AsepriteReader::load(const std::string& path)
 								std::unique_ptr<uint8_t[]> cpixels(readBytes(in, CEL_DATA_LENGTH));
 
 								unsigned long int celDataLengthUncompressed=cel->size.x*cel->size.y*4;
-								cel->pixels=std::shared_ptr<uint8_t>(new uint8_t[celDataLengthUncompressed]);
+								cel->pixels=std::shared_ptr<uint8_t[]>(new uint8_t[celDataLengthUncompressed]);
 
 								int ret=uncompress(cel->pixels.get(), &celDataLengthUncompressed, cpixels.get(), CEL_DATA_LENGTH);
 
 								if(ret!=Z_OK)
-									throw ResourceLoadException("Data decompression failed");
+									throw ResourceLoadException("Could not extract the data (zlib err: "+std::to_string(ret)+")");
 								}
 							else
 								{
@@ -273,7 +312,7 @@ void AsepriteReader::load(const std::string& path)
 
 
 						default:
-							throw ResourceLoadException("Invalid/unsupported Aseprite cel type");
+							throw ResourceLoadException("Invalid Aseprite file (unsupported cel type "+std::to_string(CEL_TYPE)+")");
 						break;
 						}
 
@@ -377,6 +416,7 @@ void AsepriteReader::load(const std::string& path)
 				break;
 
 				default:
+					//LOG_DEBUG(" - Unsupported: {}", chunkType);
 					skipBytes(in, CHUNK_SIZE-4-2);
 				break;
 				}
@@ -396,4 +436,6 @@ void AsepriteReader::load(const std::string& path)
 		}
 
 	in.close();
+
+	return ptr;
 	}
